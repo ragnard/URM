@@ -1,5 +1,5 @@
 (ns urm.core-test
-  (:refer-clojure :exclude [inc])
+  (:refer-clojure :exclude [inc pop])
   (:require [expectations :refer :all]
             [urm.core :refer :all]))
 
@@ -8,11 +8,11 @@
                    (end)]
                   []))
 
-(def add [(deb 2 1 2)
-          (inc 0 0)
-          (deb 1 3 4)
-          (inc 0 2)
-          (end)])
+(def add (urm->fn [(deb 2 1 2)
+                   (inc 0 0)
+                   (deb 1 3 4)
+                   (inc 0 2)
+                   (end)]))
 
 (expect []
         (comp-urm []
@@ -20,6 +20,11 @@
 
 (expect 3
         ((urm->fn add) 1 2))
+
+
+(time (+ 132 34982))
+(time (add 132 34982))
+
 
 (expect [(deb 0 0 1)
          (deb 1 1 2)
@@ -111,8 +116,15 @@
                                2 0
                                9 0}})))
 
-;; (expect 2
-;;         (eval-urm full-urm
-;;                   [(code-program add)
-;;                    (code-list [1 1])
-;;                    0]))
+(comment
+
+  (expect 2
+                 (eval-urm full-urm
+                           [(code-program add)
+                            (code-list [1 1])
+                            0])))
+
+(eval-urm full-urm
+                  [(code-program add)
+                   (code-list [1 1])
+                   0])

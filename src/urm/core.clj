@@ -1,7 +1,8 @@
 (ns urm.core
   (:refer-clojure :exclude [inc pop])
   (:require [clojure.pprint :refer [pprint]]
-            [clojure.math.numeric-tower :as math]))
+            [clojure.math.numeric-tower :as math]
+            [clojure.core.unify :refer :all]))
 
 (defn inc [register jump-to]
   [:inc register jump-to])
@@ -12,8 +13,8 @@
 (defn end []
   [:end])
 
-(defn apply-statement [[instruction register jump-to branch-on-zero :as statement]
-                       state]
+(defn apply-statement
+  [[instruction register jump-to branch-on-zero :as statement] state]
   (let [current (get-in state [:registers register] 0)
         branch? (= current 0)]
     (case instruction
@@ -25,14 +26,98 @@
                (assoc :position (if branch? branch-on-zero jump-to)))
       :end state)))
 
-(defn next-state [{:keys [position program] :as state}]
+
+;;--------------------------------------------------------------------
+;; "intrinsics"
+
+(def acc
+  {:pattern '[[?start :deb ?from ?next ?done]
+              [?next  :inc ?to ?start]]
+   :impl    (fn [bindings {:keys [registers] :as state}]
+              (println "ACC")
+              (let [?from (bindings '?from)
+                    ?to (bindings '?to)]
+                (-> state
+                    (update-in [:registers ?to] (fnil + 0) 1 (get registers ?from 0))
+                    (assoc-in [:registers ?from] 0)
+                    (assoc :position (bindings '?done)))))})
+
+(def zero-intrinsic
+  {:pattern  '[[?start :deb ?r ?start ?done]]
+   :impl     (fn [bindings {:keys [registers] :as state}]
+               (println "ZERO")
+               (let [?r (bindings '?r)]
+                 (-> state
+                     (assoc-in [:registers ?r] 0)
+                     (assoc :position (bindings '?done)))))})
+
+(def dup-intrinsic
+  {:pattern   '[[?0 :deb ?from ?1 ?done]
+                [?1 :inc ?scratch ?2]
+                [?2 :inc ?to ?0]]
+   :impl      (fn [bindings {:keys [registers] :as state}]
+                (println "DUP")
+                (let [?from (bindings '?from)
+                      ?to (bindings '?to)
+                      ?scratch (bindings '?scratch)]
+                  (-> state
+                      (assoc-in [:registers ?to] (get-in state [:registers ?from]))
+                      (assoc-in [:registers ?scratch] (get-in state [:registers ?from]))
+                      (assoc :position (bindings '?done)))))})
+
+(def parity-intrinsic
+  {:pattern  '[[?0 :deb ?scratch ?1 ?odd]
+               [?1 :deb ?scratch ?2 ?even]
+               [?2 :inc ?t ?0]]
+   :impl     (fn [bindings {:keys [registers] :as state}]
+               #_(println "PARITY")
+               (let [?scratch (bindings '?scratch)
+                     scratch (get-in state [:registers ?scratch])
+                     ?t (bindings '?t)]
+                 (if (zero? (mod scratch 2))
+                   (-> state
+                       ;; not needed #_(assoc-in [:registers ?t] (* scratch ))
+                       (assoc :position (bindings '?even)))
+                   (-> state
+                       (assoc :position (bindings '?odd))))))})
+
+;; [14 :inc 4 11]
+;; [11 :deb 8 12 13]
+;; [13 :deb 9 15 14]
+
+(def queue clojure.lang.PersistentQueue/EMPTY)
+
+(defn apply-intrinsic
+  [statement {:keys [position intrinsics history] :as state}]
+  (let [statement' (into [position] statement)
+        max-history (apply max (map (comp count :pattern) intrinsics))
+        history (let [history' ((fnil conj queue) history statement')]
+                  (if (<= (count history') max-history)
+                    history'
+                    (clojure.core/pop history')))
+        intrinsic (first (keep (fn [{:keys [pattern impl] :as intrinsic}]
+                                 (when-let [subst (unify pattern (take (count pattern) history))]
+                                   (partial impl subst)))
+                               intrinsics))]
+    #_[false (assoc state :history history)]
+    (if intrinsic
+      [true  (assoc (intrinsic state) :history nil)]
+      [false (assoc state :history history)])))
+
+;;--------------------------------------------------------------------
+
+(defn next-state [{:keys [position program intrinsics] :as state}]
   (let [next-statement (nth program position)]
-    (apply-statement next-statement state)))
+    (let [[intrinsified? state'] (apply-intrinsic next-statement state)]
+      (if intrinsified?
+        state'
+        (apply-statement next-statement state')))))
 
 (defn run [state]
   (let [next (next-state state)]
-    (if (< (Math/random) 0.0001) (pprint state))
-    (if (= next state)
+    (if (< (Math/random) 0.0001) (pprint (:history state)))
+    (if (= (select-keys next  [:program :position :registers])
+           (select-keys state [:program :position :registers]))
       state
       (recur next))))
 
@@ -40,7 +125,11 @@
   (fn [& args]
     (let [final-state (run {:program statements
                             :position 0
-                            :registers (zipmap (drop 1 (range)) args)})]
+                            :registers (zipmap (drop 1 (range)) args)
+                            :intrinsics [acc
+                                         zero-intrinsic
+                                         dup-intrinsic
+                                         parity-intrinsic]})]
       (get-in final-state [:registers 0]))))
 
 (defn eval-urm [statements args]
@@ -51,11 +140,11 @@
     (case instruction
       :deb (deb register
                 (if (number? jump-to)
-                    (+ jump-to n)
-                    jump-to)
+                  (+ jump-to n)
+                  jump-to)
                 (if (number? branch-on-zero)
-                    (+ branch-on-zero n)
-                    branch-on-zero))
+                  (+ branch-on-zero n)
+                  branch-on-zero))
       :inc (inc register (if (number? jump-to)
                            (+ jump-to n)
                            jump-to))
@@ -220,7 +309,7 @@
 
 (def lengths (cons 0 (reductions + (map (comp count second) uurm))))
 (def startline-lookup (zipmap (map first uurm)
-                          lengths))
+                              lengths))
 
 (defn lookup-jumps [[instruction register & line-numbers]]
   (concat [instruction register]
@@ -238,3 +327,25 @@
 
 (defn -main []
   (pprint full-urm))
+
+;;
+
+(def add [(deb 2 1 2)
+          (inc 0 0)
+          (deb 1 3 4)
+          (inc 0 2)
+          (end)])
+
+(def add-fn (urm->fn add))
+
+(time (+ 132 34982))
+(time (add-fn 132 34982))
+
+(comment
+  
+  (eval-urm full-urm
+            [(code-program add)
+             (code-list [1 1])
+             0])
+
+  )
